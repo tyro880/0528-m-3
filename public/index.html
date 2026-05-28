@@ -2,15 +2,27 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>Canvas Farm - Livestock Edition</title>
+  <title>Canvas 畜牧农场</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #1a1a2e; display: flex; justify-content: center; align-items: center; min-height: 100vh; font-family: 'Microsoft YaHei', sans-serif; }
-    canvas { border: 3px solid #4a4a6a; border-radius: 8px; cursor: pointer; }
+    body {
+      background: #1b2838;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      font-family: 'Microsoft YaHei', sans-serif;
+      overflow: hidden;
+    }
+    #gameCanvas {
+      border: 3px solid #3d5a80;
+      border-radius: 10px;
+      box-shadow: 0 0 30px rgba(61,90,128,0.5);
+    }
   </style>
 </head>
 <body>
-  <canvas id="gameCanvas" width="1200" height="800"></canvas>
+  <canvas id="gameCanvas" width="1100" height="750"></canvas>
   <script src="game.js"></script>
 </body>
 </html>

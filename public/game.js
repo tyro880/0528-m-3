@@ -1,572 +1,489 @@
-// ==================== GAME CONFIG ====================
-const CONFIG = {
-  TILE_SIZE: 80,
-  GRID_COLS: 14,
-  GRID_ROWS: 9,
-  GRID_OFFSET_X: 20,
-  GRID_OFFSET_Y: 60,
-  INITIAL_COINS: 500,
-  INITIAL_FEED: 20,
-  WAREHOUSE_MAX: 50,
-  CHICKEN_COOP_COST: 100,
-  COW_BARN_COST: 200,
-  FEED_COST: 10,
-  MEDICINE_COST: 50,
-  EGG_SELL_PRICE: 15,
-  MILK_SELL_PRICE: 30,
-  SICK_DAYS_THRESHOLD: 3,
-  DAY_DURATION_MS: 10000, // 10 seconds = 1 game day
-};
-
-// ==================== GAME STATE ====================
-let state = {
-  coins: CONFIG.INITIAL_COINS,
-  feed: CONFIG.INITIAL_FEED,
-  warehouse: { eggs: 0, milk: 0 },
-  buildings: [], // { type, col, row, animals: [{fed, hungryDays, sick, lastProduced}] }
-  day: 1,
-  lastDayTime: Date.now(),
-  animations: [],
-  particles: [],
-};
-
-// ==================== CANVAS SETUP ====================
+// ===== Canvas Farm Game - Full Livestock System =====
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
-let hoveredTile = null;
-let buildMode = null; // 'chicken_coop' or 'cow_barn'
-let showShop = false;
-let showWarehouse = false;
-let tooltip = null;
 
-// ==================== SAVE/LOAD ====================
-function saveGame() {
-  const saveData = {
-    coins: state.coins,
-    feed: state.feed,
-    warehouse: state.warehouse,
-    buildings: state.buildings,
-    day: state.day,
-    lastDayTime: state.lastDayTime,
-  };
-  localStorage.setItem('farmGame', JSON.stringify(saveData));
-  fetch('/api/state', {
-    method: 'POST',
+const TILE = 90;
+const COLS = 10;
+const ROWS = 6;
+const OFFSET_X = 55;
+const OFFSET_Y = 120;
+const DAY_MS = 12000;
+
+let state = null;
+let contextMenu = null;
+let animations = [];
+let floatingTexts = [];
+let flashingBuildings = new Set();
+let dayTimer = 0;
+let longPressTimer = null;
+let longPressPos = null;
+
+// ===== API =====
+async function api(endpoint, body) {
+  const res = await fetch('/api/' + endpoint, {
+    method: body ? 'POST' : 'GET',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state: saveData }),
-  }).catch(() => {});
+    body: body ? JSON.stringify(body) : undefined
+  });
+  return res.json();
 }
 
-function loadGame() {
-  const saved = localStorage.getItem('farmGame');
-  if (saved) {
-    const data = JSON.parse(saved);
-    state.coins = data.coins;
-    state.feed = data.feed;
-    state.warehouse = data.warehouse || { eggs: 0, milk: 0 };
-    state.buildings = data.buildings || [];
-    state.day = data.day || 1;
-    state.lastDayTime = data.lastDayTime || Date.now();
+async function loadState() {
+  state = await api('state');
+  dayTimer = Date.now();
+}
+
+async function buildAt(type, col, row) {
+  const res = await api('build', { type, col, row });
+  if (res.ok) {
+    state = res.state;
+    animations.push({ type: 'build', col, row, scale: 0, t: 0 });
+    addFloat(`-${type === 'chicken' ? 200 : 500} 金币`, col, row, '#ff6');
+  } else {
+    addFloat(res.msg, col, row, '#f44');
   }
 }
 
-// ==================== GRID HELPERS ====================
-function getTileAt(col, row) {
-  return state.buildings.find(b => b.col === col && b.row === row);
-}
-
-function isValidBuildTile(col, row) {
-  if (col < 0 || col >= CONFIG.GRID_COLS || row < 0 || row >= CONFIG.GRID_ROWS) return false;
-  return !getTileAt(col, row);
-}
-
-function getTileFromMouse(mx, my) {
-  const col = Math.floor((mx - CONFIG.GRID_OFFSET_X) / CONFIG.TILE_SIZE);
-  const row = Math.floor((my - CONFIG.GRID_OFFSET_Y) / CONFIG.TILE_SIZE);
-  if (col >= 0 && col < CONFIG.GRID_COLS && row >= 0 && row < CONFIG.GRID_ROWS) {
-    return { col, row };
+async function feedAnimal(buildingId) {
+  const res = await api('feed', { buildingId });
+  if (res.ok) {
+    state = res.state;
+    const b = state.buildings.find(x => x.id === buildingId);
+    if (b) addFloat('喂食成功!', b.col, b.row, '#4f4');
+  } else {
+    addFloat(res.msg, 5, 3, '#f44');
   }
+}
+
+async function healAnimal(buildingId) {
+  const res = await api('heal', { buildingId });
+  if (res.ok) {
+    state = res.state;
+    addFloat('治愈成功!', 5, 3, '#f4f');
+  } else {
+    addFloat(res.msg, 5, 3, '#f44');
+  }
+}
+
+async function buyFeed(amount) {
+  const res = await api('buy-feed', { amount });
+  if (res.ok) {
+    state = res.state;
+    addFloat(`+${amount} 饲料`, 5, 0, '#4f4');
+  } else {
+    addFloat(res.msg, 5, 0, '#f44');
+  }
+}
+
+async function sellAll() {
+  const res = await api('sell-all', {});
+  if (res.ok) {
+    state = res.state;
+    if (res.earned > 0) addFloat(`+${res.earned} 金币!`, 5, 3, '#fd0');
+  }
+}
+
+async function nextDay() {
+  const res = await api('next-day', {});
+  if (res.ok) {
+    state = res.state;
+    addFloat(`第 ${state.day} 天`, 5, 3, '#fff');
+    if (state.warehouse.length >= state.warehouseMax) {
+      state.buildings.forEach(b => flashingBuildings.add(b.id));
+      setTimeout(() => flashingBuildings.clear(), 2000);
+    }
+  }
+}
+
+// ===== Helpers =====
+function getTile(mx, my) {
+  const col = Math.floor((mx - OFFSET_X) / TILE);
+  const row = Math.floor((my - OFFSET_Y) / TILE);
+  if (col >= 0 && col < COLS && row >= 0 && row < ROWS) return { col, row };
   return null;
 }
 
-// ==================== BUILDING ACTIONS ====================
-function buildStructure(type, col, row) {
-  const cost = type === 'chicken_coop' ? CONFIG.CHICKEN_COOP_COST : CONFIG.COW_BARN_COST;
-  if (state.coins < cost) {
-    addFloatingText('金币不足!', col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X, row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y, '#ff4444');
-    return;
-  }
-  state.coins -= cost;
-  const animalCount = type === 'chicken_coop' ? 3 : 2;
-  const animals = [];
-  for (let i = 0; i < animalCount; i++) {
-    animals.push({ fed: true, hungryDays: 0, sick: false, lastProduced: state.day });
-  }
-  state.buildings.push({ type, col, row, animals, buildAnim: 1.0 });
-  addBuildParticles(col, row);
-  addFloatingText(`-${cost} 金币`, col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X + 20, row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y, '#ffcc00');
-  buildMode = null;
-  saveGame();
+function getBuildingAt(col, row) {
+  return state.buildings.find(b => b.col === col && b.row === row);
 }
 
-function feedBuilding(building) {
-  const feedNeeded = building.animals.length;
-  if (state.feed < feedNeeded) {
-    addFloatingText('饲料不足!', building.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X, building.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y, '#ff4444');
-    return;
-  }
-  state.feed -= feedNeeded;
-  building.animals.forEach(a => {
-    a.fed = true;
-    a.hungryDays = 0;
+function addFloat(text, col, row, color) {
+  floatingTexts.push({
+    text, color,
+    x: OFFSET_X + col * TILE + TILE / 2,
+    y: OFFSET_Y + row * TILE,
+    life: 80, alpha: 1
   });
-  addFloatingText('已喂食!', building.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X + 20, building.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y, '#44ff44');
-  saveGame();
 }
 
-function healBuilding(building) {
-  const sickCount = building.animals.filter(a => a.sick).length;
-  const cost = sickCount * CONFIG.MEDICINE_COST;
-  if (state.coins < cost) {
-    addFloatingText('金币不足!', building.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X, building.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y, '#ff4444');
-    return;
+// ===== Drawing =====
+function drawSky() {
+  const g = ctx.createLinearGradient(0, 0, 0, OFFSET_Y);
+  g.addColorStop(0, '#4fa4d4');
+  g.addColorStop(1, '#87ceeb');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, canvas.width, OFFSET_Y);
+
+  // sun
+  ctx.fillStyle = '#ffe066';
+  ctx.beginPath();
+  ctx.arc(80, 50, 30, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawGround() {
+  ctx.fillStyle = '#3d7a28';
+  ctx.fillRect(0, OFFSET_Y - 10, canvas.width, canvas.height - OFFSET_Y + 10);
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x = OFFSET_X + c * TILE;
+      const y = OFFSET_Y + r * TILE;
+      ctx.fillStyle = (c + r) % 2 === 0 ? '#4a8b30' : '#3f7a28';
+      ctx.fillRect(x, y, TILE, TILE);
+      ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x, y, TILE, TILE);
+    }
   }
-  if (sickCount === 0) return;
-  state.coins -= cost;
-  building.animals.forEach(a => {
+}
+
+function drawBuilding(b) {
+  const x = OFFSET_X + b.col * TILE;
+  const y = OFFSET_Y + b.row * TILE;
+
+  // Build animation
+  const anim = animations.find(a => a.type === 'build' && a.col === b.col && a.row === b.row);
+  let scale = 1;
+  if (anim) scale = Math.min(anim.scale, 1);
+
+  // Flashing red warning
+  const flashing = flashingBuildings.has(b.id);
+  if (flashing && Math.floor(Date.now() / 200) % 2 === 0) {
+    ctx.fillStyle = 'rgba(255,0,0,0.3)';
+    ctx.fillRect(x, y, TILE, TILE);
+  }
+
+  ctx.save();
+  ctx.translate(x + TILE / 2, y + TILE / 2);
+  ctx.scale(scale, scale);
+  ctx.translate(-(TILE / 2), -(TILE / 2));
+
+  if (b.type === 'chicken') {
+    // Coop body
+    ctx.fillStyle = '#d4a056';
+    ctx.fillRect(8, 30, 74, 50);
+    // Roof
+    ctx.fillStyle = '#8B0000';
+    ctx.beginPath();
+    ctx.moveTo(3, 33);
+    ctx.lineTo(45, 8);
+    ctx.lineTo(87, 33);
+    ctx.closePath();
+    ctx.fill();
+    // Door
+    ctx.fillStyle = '#5c3a1e';
+    ctx.fillRect(35, 50, 20, 30);
+    // Chicken emoji
+    ctx.font = '20px serif';
+    ctx.fillText('🐔', 55, 75);
+  } else {
+    // Barn body
+    ctx.fillStyle = '#b8860b';
+    ctx.fillRect(5, 28, 80, 55);
+    // Roof
+    ctx.fillStyle = '#4a0000';
+    ctx.beginPath();
+    ctx.moveTo(0, 30);
+    ctx.lineTo(45, 5);
+    ctx.lineTo(90, 30);
+    ctx.closePath();
+    ctx.fill();
+    // Door
+    ctx.fillStyle = '#2a1a0a';
+    ctx.fillRect(30, 45, 30, 38);
+    ctx.fillStyle = '#5c3a1e';
+    ctx.fillRect(44, 45, 2, 38);
+    // Cow emoji
+    ctx.font = '22px serif';
+    ctx.fillText('🐄', 55, 78);
+  }
+
+  ctx.restore();
+
+  // Mood icons above building
+  b.animals.forEach((a, i) => {
+    const ix = x + 10 + i * 25;
+    const iy = y - 5;
     if (a.sick) {
-      a.sick = false;
-      a.hungryDays = 0;
-    }
-  });
-  addFloatingText(`-${cost} 治疗费`, building.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X + 10, building.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y, '#ff88ff');
-  saveGame();
-}
-
-// ==================== DAY CYCLE ====================
-function processDayEnd() {
-  state.day++;
-  const totalWarehouse = state.warehouse.eggs + state.warehouse.milk;
-  const warehouseFull = totalWarehouse >= CONFIG.WAREHOUSE_MAX;
-
-  state.buildings.forEach(building => {
-    building.animals.forEach(animal => {
-      if (!animal.fed) {
-        animal.hungryDays++;
-        if (animal.hungryDays >= CONFIG.SICK_DAYS_THRESHOLD) {
-          animal.sick = true;
-        }
-      }
-      animal.fed = false;
-
-      if (!animal.sick && !warehouseFull) {
-        if (building.type === 'chicken_coop') {
-          state.warehouse.eggs++;
-          addFloatingText('+1 蛋', building.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X + 40, building.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y + 20, '#fff8dc');
-        } else {
-          state.warehouse.milk++;
-          addFloatingText('+1 奶', building.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X + 40, building.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y + 20, '#f0f8ff');
-        }
-      }
-    });
-  });
-  state.lastDayTime = Date.now();
-  saveGame();
-}
-
-// ==================== SHOP ====================
-function buyFeed(amount) {
-  const cost = amount * CONFIG.FEED_COST;
-  if (state.coins < cost) return;
-  state.coins -= cost;
-  state.feed += amount;
-  saveGame();
-}
-
-function sellProducts() {
-  const earnings = state.warehouse.eggs * CONFIG.EGG_SELL_PRICE + state.warehouse.milk * CONFIG.MILK_SELL_PRICE;
-  if (earnings === 0) return;
-  state.coins += earnings;
-  state.warehouse.eggs = 0;
-  state.warehouse.milk = 0;
-  addFloatingText(`+${earnings} 金币!`, 600, 400, '#ffdd00');
-  saveGame();
-}
-
-// ==================== ANIMATIONS & PARTICLES ====================
-function addFloatingText(text, x, y, color) {
-  state.animations.push({ type: 'text', text, x, y, color, alpha: 1.0, vy: -1.5, life: 60 });
-}
-
-function addBuildParticles(col, row) {
-  const cx = col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X + CONFIG.TILE_SIZE / 2;
-  const cy = row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y + CONFIG.TILE_SIZE / 2;
-  for (let i = 0; i < 20; i++) {
-    const angle = (Math.PI * 2 * i) / 20;
-    const speed = 2 + Math.random() * 3;
-    state.particles.push({
-      x: cx, y: cy,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      life: 30 + Math.random() * 20,
-      color: ['#ffd700', '#ff8c00', '#8b4513', '#daa520'][Math.floor(Math.random() * 4)],
-      size: 3 + Math.random() * 4,
-    });
-  }
-}
-
-function updateAnimations() {
-  state.animations = state.animations.filter(a => {
-    a.y += a.vy;
-    a.life--;
-    a.alpha = Math.max(0, a.life / 60);
-    return a.life > 0;
-  });
-  state.particles = state.particles.filter(p => {
-    p.x += p.vx;
-    p.y += p.vy;
-    p.vy += 0.1;
-    p.life--;
-    return p.life > 0;
-  });
-  state.buildings.forEach(b => {
-    if (b.buildAnim && b.buildAnim > 0) {
-      b.buildAnim -= 0.02;
-    }
-  });
-}
-
-// ==================== RENDERING ====================
-function drawBackground() {
-  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  grad.addColorStop(0, '#87ceeb');
-  grad.addColorStop(0.3, '#98d4ee');
-  grad.addColorStop(1, '#4a8c3f');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-}
-
-function drawGrid() {
-  for (let row = 0; row < CONFIG.GRID_ROWS; row++) {
-    for (let col = 0; col < CONFIG.GRID_COLS; col++) {
-      const x = col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X;
-      const y = row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y;
-      ctx.fillStyle = (col + row) % 2 === 0 ? '#5d9e3a' : '#4d8e2a';
-      ctx.fillRect(x, y, CONFIG.TILE_SIZE, CONFIG.TILE_SIZE);
-      ctx.strokeStyle = 'rgba(0,0,0,0.1)';
-      ctx.strokeRect(x, y, CONFIG.TILE_SIZE, CONFIG.TILE_SIZE);
-    }
-  }
-}
-
-function drawBuildings() {
-  state.buildings.forEach(building => {
-    const x = building.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X;
-    const y = building.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y;
-    let scale = 1;
-    if (building.buildAnim && building.buildAnim > 0) {
-      scale = 1 - building.buildAnim;
-    }
-
-    ctx.save();
-    ctx.translate(x + CONFIG.TILE_SIZE / 2, y + CONFIG.TILE_SIZE / 2);
-    ctx.scale(scale, scale);
-    ctx.translate(-(x + CONFIG.TILE_SIZE / 2), -(y + CONFIG.TILE_SIZE / 2));
-
-    if (building.type === 'chicken_coop') {
-      drawChickenCoop(x, y, building);
+      ctx.font = '16px serif';
+      ctx.fillText('🤒', ix, iy);
+    } else if (a.hungryDays > 0) {
+      ctx.font = '16px serif';
+      ctx.fillText('😟', ix, iy);
     } else {
-      drawCowBarn(x, y, building);
-    }
-    ctx.restore();
-
-    const sickCount = building.animals.filter(a => a.sick).length;
-    const hungryCount = building.animals.filter(a => !a.fed && a.hungryDays > 0).length;
-    if (sickCount > 0) {
-      ctx.fillStyle = '#ff0000';
-      ctx.font = 'bold 16px Arial';
-      ctx.fillText('🤒x' + sickCount, x + 2, y + 16);
-    } else if (hungryCount > 0) {
-      ctx.fillStyle = '#ffaa00';
-      ctx.font = '14px Arial';
-      ctx.fillText('饿x' + hungryCount, x + 2, y + 16);
+      ctx.font = '16px serif';
+      ctx.fillText('😊', ix, iy);
     }
   });
-}
 
-function drawChickenCoop(x, y, building) {
-  // Base
-  ctx.fillStyle = '#8B4513';
-  ctx.fillRect(x + 10, y + 30, 60, 45);
-  // Roof
-  ctx.fillStyle = '#A0522D';
-  ctx.beginPath();
-  ctx.moveTo(x + 5, y + 32);
-  ctx.lineTo(x + 40, y + 10);
-  ctx.lineTo(x + 75, y + 32);
-  ctx.closePath();
+  // Feed button
+  const btnX = x + TILE + 2;
+  const btnY = y + 10;
+  const btnW = 32;
+  const btnH = 24;
+  ctx.fillStyle = b.fedToday ? '#666' : '#2e7d32';
+  roundRect(ctx, btnX, btnY, btnW, btnH, 4);
   ctx.fill();
-  // Door
-  ctx.fillStyle = '#654321';
-  ctx.fillRect(x + 30, y + 50, 20, 25);
-  // Chickens
-  const healthy = building.animals.filter(a => !a.sick).length;
   ctx.fillStyle = '#fff';
   ctx.font = '11px Arial';
-  ctx.fillText(`🐔x${healthy}`, x + 45, y + 72);
-}
+  ctx.textAlign = 'center';
+  ctx.fillText(b.fedToday ? '已喂' : '喂食', btnX + btnW / 2, btnY + 16);
+  ctx.textAlign = 'left';
 
-function drawCowBarn(x, y, building) {
-  // Base
-  ctx.fillStyle = '#CD853F';
-  ctx.fillRect(x + 5, y + 25, 70, 50);
-  // Roof
-  ctx.fillStyle = '#8B0000';
-  ctx.beginPath();
-  ctx.moveTo(x, y + 27);
-  ctx.lineTo(x + 40, y + 5);
-  ctx.lineTo(x + 80, y + 27);
-  ctx.closePath();
-  ctx.fill();
-  // Door
-  ctx.fillStyle = '#4a2a0a';
-  ctx.fillRect(x + 28, y + 45, 24, 30);
-  // Cows
-  const healthy = building.animals.filter(a => !a.sick).length;
-  ctx.fillStyle = '#fff';
-  ctx.font = '11px Arial';
-  ctx.fillText(`🐄x${healthy}`, x + 48, y + 72);
-}
+  // Heal button if sick
+  const hasSick = b.animals.some(a => a.sick);
+  if (hasSick) {
+    const hbtnY = btnY + 28;
+    ctx.fillStyle = '#c62828';
+    roundRect(ctx, btnX, hbtnY, btnW, btnH, 4);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '11px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('治疗', btnX + btnW / 2, hbtnY + 16);
+    ctx.textAlign = 'left';
+  }
 
-function drawHoverIndicator() {
-  if (!hoveredTile) return;
-  if (buildMode) {
-    const x = hoveredTile.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X;
-    const y = hoveredTile.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y;
-    const valid = isValidBuildTile(hoveredTile.col, hoveredTile.row);
-    ctx.strokeStyle = valid ? '#00ff00' : '#ff0000';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([5, 5]);
-    ctx.strokeRect(x + 2, y + 2, CONFIG.TILE_SIZE - 4, CONFIG.TILE_SIZE - 4);
-    ctx.setLineDash([]);
-    ctx.lineWidth = 1;
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.font = '12px Arial';
-    const label = buildMode === 'chicken_coop' ? '鸡舍' : '牛棚';
-    ctx.fillText(`建造${label}`, x + 10, y + CONFIG.TILE_SIZE + 15);
+  // Warehouse full warning
+  if (flashing) {
+    ctx.fillStyle = '#ff0000';
+    ctx.font = 'bold 12px Arial';
+    ctx.fillText('⚠仓库满', x + 5, y + TILE + 14);
   }
 }
 
 function drawHUD() {
-  const totalWarehouse = state.warehouse.eggs + state.warehouse.milk;
-  const warehousePercent = Math.round((totalWarehouse / CONFIG.WAREHOUSE_MAX) * 100);
-
-  // HUD Background
-  ctx.fillStyle = 'rgba(0,0,0,0.75)';
-  ctx.roundRect(canvas.width - 260, 8, 250, 90, 8);
+  // Background panel
+  ctx.fillStyle = 'rgba(0,0,0,0.8)';
+  roundRect(ctx, canvas.width - 280, 10, 270, 100, 10);
   ctx.fill();
 
+  ctx.font = 'bold 15px Arial';
   ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 16px Arial';
-  ctx.fillText(`💰 金币: ${state.coins}`, canvas.width - 245, 32);
+  ctx.fillText(`💰 金币: ${state.coins}`, canvas.width - 265, 35);
 
   ctx.fillStyle = '#90ee90';
-  ctx.fillText(`🌾 饲料: ${state.feed}`, canvas.width - 245, 55);
+  ctx.fillText(`🌾 饲料: ${state.feed}`, canvas.width - 265, 58);
 
-  ctx.fillStyle = warehousePercent >= 90 ? '#ff6666' : '#87cefa';
-  ctx.fillText(`📦 仓库: ${totalWarehouse}/${CONFIG.WAREHOUSE_MAX} (${warehousePercent}%)`, canvas.width - 245, 78);
+  const wUsed = state.warehouse.length;
+  const wMax = state.warehouseMax;
+  const pct = Math.round(wUsed / wMax * 100);
+  ctx.fillStyle = pct >= 90 ? '#ff4444' : '#87cefa';
+  ctx.fillText(`📦 仓库: ${wUsed}/${wMax} (${pct}%)`, canvas.width - 265, 81);
 
-  // Day counter
-  ctx.fillStyle = 'rgba(0,0,0,0.75)';
-  ctx.roundRect(canvas.width - 260, 105, 250, 30, 8);
-  ctx.fill();
   ctx.fillStyle = '#fff';
-  ctx.font = '14px Arial';
-  const elapsed = Date.now() - state.lastDayTime;
-  const progress = Math.min(elapsed / CONFIG.DAY_DURATION_MS, 1);
-  ctx.fillText(`📅 第 ${state.day} 天`, canvas.width - 245, 125);
-  // Progress bar
+  ctx.fillText(`📅 第 ${state.day} 天`, canvas.width - 265, 104);
+
+  // Day progress bar
+  const elapsed = Date.now() - dayTimer;
+  const prog = Math.min(elapsed / DAY_MS, 1);
   ctx.fillStyle = '#333';
-  ctx.fillRect(canvas.width - 140, 113, 120, 14);
-  ctx.fillStyle = '#4caf50';
-  ctx.fillRect(canvas.width - 140, 113, 120 * progress, 14);
+  ctx.fillRect(canvas.width - 140, 93, 110, 12);
+  ctx.fillStyle = prog > 0.8 ? '#f44' : '#4caf50';
+  ctx.fillRect(canvas.width - 140, 93, 110 * prog, 12);
   ctx.strokeStyle = '#555';
-  ctx.strokeRect(canvas.width - 140, 113, 120, 14);
+  ctx.strokeRect(canvas.width - 140, 93, 110, 12);
 }
 
-function drawToolbar() {
-  // Bottom toolbar
-  ctx.fillStyle = 'rgba(0,0,0,0.8)';
-  ctx.fillRect(0, canvas.height - 55, canvas.width, 55);
+function drawShopBar() {
+  const barY = canvas.height - 50;
+  ctx.fillStyle = 'rgba(20,20,40,0.9)';
+  ctx.fillRect(0, barY, canvas.width, 50);
 
   const buttons = [
-    { label: '🐔 建鸡舍 ($100)', action: 'build_chicken', x: 20 },
-    { label: '🐄 建牛棚 ($200)', action: 'build_cow', x: 180 },
-    { label: '🌾 买饲料x5 ($50)', action: 'buy_feed', x: 350 },
-    { label: '💰 出售产物', action: 'sell', x: 530 },
-    { label: '📦 仓库详情', action: 'warehouse', x: 670 },
+    { label: '🌾 买饲料x3 ($45)', x: 20, w: 160, action: 'buy3' },
+    { label: '🌾 买饲料x10 ($150)', x: 190, w: 170, action: 'buy10' },
+    { label: '💰 全部出售', x: 370, w: 120, action: 'sell' },
+    { label: `📦 仓库 [${state ? state.warehouse.length : 0}]`, x: 500, w: 130, action: 'info' },
   ];
 
   buttons.forEach(btn => {
-    const w = 140;
-    const h = 36;
-    const y = canvas.height - 46;
-    const isHover = tooltip && tooltip.action === btn.action;
-    ctx.fillStyle = isHover ? '#555' : '#3a3a5a';
-    ctx.roundRect(btn.x, y, w, h, 6);
+    ctx.fillStyle = '#3a506b';
+    roundRect(ctx, btn.x, barY + 8, btn.w, 34, 6);
     ctx.fill();
-    ctx.strokeStyle = '#888';
-    ctx.roundRect(btn.x, y, w, h, 6);
+    ctx.strokeStyle = '#5a7a9a';
+    roundRect(ctx, btn.x, barY + 8, btn.w, 34, 6);
     ctx.stroke();
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = '#eee';
     ctx.font = '13px Arial';
-    ctx.fillText(btn.label, btn.x + 8, y + 24);
+    ctx.fillText(btn.label, btn.x + 10, barY + 30);
   });
 }
 
-function drawTooltip() {
-  if (!tooltip || !tooltip.building) return;
-  const b = tooltip.building;
-  const x = b.col * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_X + CONFIG.TILE_SIZE + 5;
-  const y = b.row * CONFIG.TILE_SIZE + CONFIG.GRID_OFFSET_Y;
-  const sickCount = b.animals.filter(a => a.sick).length;
-  const hungryCount = b.animals.filter(a => a.hungryDays > 0).length;
-  const typeName = b.type === 'chicken_coop' ? '鸡舍' : '牛棚';
+function drawContextMenu() {
+  if (!contextMenu) return;
+  const { x, y } = contextMenu;
+  const w = 150;
+  const h = 90;
+  const mx = Math.min(x, canvas.width - w - 10);
+  const my = Math.min(y, canvas.height - h - 10);
 
-  ctx.fillStyle = 'rgba(0,0,0,0.9)';
-  ctx.roundRect(x, y, 180, 110, 6);
+  ctx.fillStyle = 'rgba(30,30,50,0.95)';
+  roundRect(ctx, mx, my, w, h, 8);
   ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.font = '13px Arial';
-  ctx.fillText(`${typeName} - ${b.animals.length}只`, x + 10, y + 20);
-  ctx.fillText(`健康: ${b.animals.length - sickCount}  生病: ${sickCount}`, x + 10, y + 40);
-  ctx.fillText(`饥饿: ${hungryCount}`, x + 10, y + 58);
-  ctx.fillStyle = '#aaffaa';
-  ctx.fillText(`[左键] 喂食`, x + 10, y + 80);
-  ctx.fillStyle = '#ffaaaa';
-  ctx.fillText(`[右键] 治疗 ($${sickCount * CONFIG.MEDICINE_COST})`, x + 10, y + 98);
+  ctx.strokeStyle = '#6a8caf';
+  ctx.lineWidth = 2;
+  roundRect(ctx, mx, my, w, h, 8);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  ctx.fillStyle = '#ddd';
+  ctx.font = 'bold 13px Arial';
+  ctx.fillText('建造:', mx + 10, my + 20);
+
+  // Chicken button
+  ctx.fillStyle = '#5d4e37';
+  roundRect(ctx, mx + 10, my + 28, 130, 24, 4);
+  ctx.fill();
+  ctx.fillStyle = '#ffe';
+  ctx.font = '12px Arial';
+  ctx.fillText('🐔 鸡舍 (200金币)', mx + 16, my + 45);
+
+  // Cow button
+  ctx.fillStyle = '#37475d';
+  roundRect(ctx, mx + 10, my + 58, 130, 24, 4);
+  ctx.fill();
+  ctx.fillStyle = '#ffe';
+  ctx.fillText('🐄 牛棚 (500金币)', mx + 16, my + 75);
+
+  contextMenu.rect = { x: mx, y: my, w, h };
 }
 
-function drawWarehousePanel() {
-  if (!showWarehouse) return;
-  ctx.fillStyle = 'rgba(0,0,0,0.9)';
-  ctx.roundRect(400, 200, 400, 300, 12);
-  ctx.fill();
-  ctx.strokeStyle = '#888';
-  ctx.roundRect(400, 200, 400, 300, 12);
-  ctx.stroke();
-
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 20px Arial';
-  ctx.fillText('📦 仓库详情', 450, 240);
-
-  ctx.font = '16px Arial';
-  ctx.fillStyle = '#fff8dc';
-  ctx.fillText(`🥚 鸡蛋: ${state.warehouse.eggs} (单价 $${CONFIG.EGG_SELL_PRICE})`, 450, 280);
-  ctx.fillStyle = '#f0f8ff';
-  ctx.fillText(`🥛 牛奶: ${state.warehouse.milk} (单价 $${CONFIG.MILK_SELL_PRICE})`, 450, 310);
-
-  const total = state.warehouse.eggs + state.warehouse.milk;
-  ctx.fillStyle = '#87cefa';
-  ctx.fillText(`总计: ${total} / ${CONFIG.WAREHOUSE_MAX}`, 450, 350);
-
-  const totalValue = state.warehouse.eggs * CONFIG.EGG_SELL_PRICE + state.warehouse.milk * CONFIG.MILK_SELL_PRICE;
-  ctx.fillStyle = '#ffd700';
-  ctx.fillText(`总价值: $${totalValue}`, 450, 385);
-
-  ctx.fillStyle = '#aaa';
-  ctx.font = '14px Arial';
-  ctx.fillText('点击任意位置关闭', 450, 470);
+function drawFloatingTexts() {
+  floatingTexts.forEach(f => {
+    ctx.globalAlpha = f.alpha;
+    ctx.fillStyle = f.color;
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(f.text, f.x, f.y);
+    ctx.textAlign = 'left';
+  });
+  ctx.globalAlpha = 1;
 }
 
 function drawAnimations() {
-  state.animations.forEach(a => {
-    ctx.globalAlpha = a.alpha;
-    ctx.fillStyle = a.color;
-    ctx.font = 'bold 14px Arial';
-    ctx.fillText(a.text, a.x, a.y);
+  animations.forEach(a => {
+    if (a.type === 'build') {
+      const x = OFFSET_X + a.col * TILE + TILE / 2;
+      const y = OFFSET_Y + a.row * TILE + TILE / 2;
+      const r = (1 - a.scale) * 40;
+      ctx.strokeStyle = `rgba(255,215,0,${1 - a.scale})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(x, y, r + 20, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 1;
+    }
   });
-  ctx.globalAlpha = 1;
-
-  state.particles.forEach(p => {
-    ctx.globalAlpha = p.life / 50;
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-    ctx.fill();
-  });
-  ctx.globalAlpha = 1;
 }
 
-function drawBuildModeLabel() {
-  if (!buildMode) return;
-  ctx.fillStyle = 'rgba(255,200,0,0.9)';
-  ctx.font = 'bold 16px Arial';
-  const label = buildMode === 'chicken_coop' ? '鸡舍' : '牛棚';
-  ctx.fillText(`🔨 建造模式: ${label} (按ESC取消)`, 20, 30);
+function drawInstructions() {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  roundRect(ctx, 10, 10, 320, 28, 6);
+  ctx.fill();
+  ctx.fillStyle = '#ccc';
+  ctx.font = '12px Arial';
+  ctx.fillText('右键空地 → 建造 | 点击"喂食"按钮 | 底栏买卖', 20, 28);
 }
 
-// ==================== MAIN LOOP ====================
-function update() {
-  const elapsed = Date.now() - state.lastDayTime;
-  if (elapsed >= CONFIG.DAY_DURATION_MS) {
-    processDayEnd();
+// ===== Context Menu Logic =====
+function handleContextMenuClick(mx, my) {
+  if (!contextMenu || !contextMenu.rect) return false;
+  const { rect, col, row } = contextMenu;
+  const rx = rect.x;
+  const ry = rect.y;
+
+  if (mx >= rx + 10 && mx <= rx + 140 && my >= ry + 28 && my <= ry + 52) {
+    buildAt('chicken', col, row);
+    contextMenu = null;
+    return true;
   }
-  updateAnimations();
+  if (mx >= rx + 10 && mx <= rx + 140 && my >= ry + 58 && my <= ry + 82) {
+    buildAt('cow', col, row);
+    contextMenu = null;
+    return true;
+  }
+  contextMenu = null;
+  return true;
 }
 
-function render() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawBackground();
-  drawGrid();
-  drawBuildings();
-  drawHoverIndicator();
-  drawAnimations();
-  drawHUD();
-  drawToolbar();
-  drawTooltip();
-  drawWarehousePanel();
-  drawBuildModeLabel();
-}
+function handleFeedButtonClick(mx, my) {
+  for (const b of state.buildings) {
+    const btnX = OFFSET_X + b.col * TILE + TILE + 2;
+    const btnY = OFFSET_Y + b.row * TILE + 10;
+    const btnW = 32;
+    const btnH = 24;
 
-function gameLoop() {
-  update();
-  render();
-  requestAnimationFrame(gameLoop);
-}
+    if (mx >= btnX && mx <= btnX + btnW && my >= btnY && my <= btnY + btnH) {
+      if (!b.fedToday) feedAnimal(b.id);
+      return true;
+    }
 
-// ==================== INPUT HANDLING ====================
-canvas.addEventListener('mousemove', (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
-  hoveredTile = getTileFromMouse(mx, my);
-
-  // Check toolbar hover
-  const toolbarY = canvas.height - 46;
-  const buttons = [
-    { action: 'build_chicken', x: 20, w: 140 },
-    { action: 'build_cow', x: 180, w: 140 },
-    { action: 'buy_feed', x: 350, w: 140 },
-    { action: 'sell', x: 530, w: 140 },
-    { action: 'warehouse', x: 670, w: 140 },
-  ];
-  tooltip = null;
-  if (my >= toolbarY && my <= toolbarY + 36) {
-    for (const btn of buttons) {
-      if (mx >= btn.x && mx <= btn.x + btn.w) {
-        tooltip = { action: btn.action };
-        break;
+    const hasSick = b.animals.some(a => a.sick);
+    if (hasSick) {
+      const hbtnY = btnY + 28;
+      if (mx >= btnX && mx <= btnX + btnW && my >= hbtnY && my <= hbtnY + btnH) {
+        healAnimal(b.id);
+        return true;
       }
     }
   }
+  return false;
+}
 
-  // Check building hover for tooltip
-  if (hoveredTile && !buildMode) {
-    const b = getTileAt(hoveredTile.col, hoveredTile.row);
-    if (b) {
-      tooltip = { building: b };
-    }
+function handleShopClick(mx, my) {
+  const barY = canvas.height - 50;
+  if (my < barY + 8 || my > barY + 42) return false;
+
+  if (mx >= 20 && mx <= 180) { buyFeed(3); return true; }
+  if (mx >= 190 && mx <= 360) { buyFeed(10); return true; }
+  if (mx >= 370 && mx <= 490) { sellAll(); return true; }
+  return false;
+}
+
+// ===== Events =====
+canvas.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const tile = getTile(mx, my);
+  if (tile && !getBuildingAt(tile.col, tile.row)) {
+    contextMenu = { x: mx, y: my, col: tile.col, row: tile.row };
+  }
+});
+
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button === 0) {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    longPressPos = { mx, my };
+    longPressTimer = setTimeout(() => {
+      const tile = getTile(mx, my);
+      if (tile && !getBuildingAt(tile.col, tile.row)) {
+        contextMenu = { x: mx, y: my, col: tile.col, row: tile.row };
+      }
+      longPressTimer = null;
+    }, 600);
+  }
+});
+
+canvas.addEventListener('mouseup', () => {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
   }
 });
 
@@ -575,91 +492,80 @@ canvas.addEventListener('click', (e) => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
 
-  if (showWarehouse) {
-    showWarehouse = false;
+  if (contextMenu) {
+    handleContextMenuClick(mx, my);
     return;
   }
-
-  // Toolbar clicks
-  const toolbarY = canvas.height - 46;
-  if (my >= toolbarY && my <= toolbarY + 36) {
-    const buttons = [
-      { action: 'build_chicken', x: 20, w: 140 },
-      { action: 'build_cow', x: 180, w: 140 },
-      { action: 'buy_feed', x: 350, w: 140 },
-      { action: 'sell', x: 530, w: 140 },
-      { action: 'warehouse', x: 670, w: 140 },
-    ];
-    for (const btn of buttons) {
-      if (mx >= btn.x && mx <= btn.x + btn.w) {
-        switch (btn.action) {
-          case 'build_chicken': buildMode = 'chicken_coop'; break;
-          case 'build_cow': buildMode = 'cow_barn'; break;
-          case 'buy_feed': buyFeed(5); break;
-          case 'sell': sellProducts(); break;
-          case 'warehouse': showWarehouse = true; break;
-        }
-        return;
-      }
-    }
-  }
-
-  // Grid clicks
-  const tile = getTileFromMouse(mx, my);
-  if (!tile) return;
-
-  if (buildMode) {
-    if (isValidBuildTile(tile.col, tile.row)) {
-      buildStructure(buildMode, tile.col, tile.row);
-    }
-  } else {
-    const building = getTileAt(tile.col, tile.row);
-    if (building) {
-      feedBuilding(building);
-    }
-  }
+  if (handleFeedButtonClick(mx, my)) return;
+  if (handleShopClick(mx, my)) return;
 });
 
-canvas.addEventListener('contextmenu', (e) => {
-  e.preventDefault();
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
-  const tile = getTileFromMouse(mx, my);
-  if (!tile) return;
-
-  const building = getTileAt(tile.col, tile.row);
-  if (building) {
-    healBuilding(building);
+// ===== Update =====
+function update() {
+  // Day timer
+  const elapsed = Date.now() - dayTimer;
+  if (elapsed >= DAY_MS && state) {
+    nextDay();
+    dayTimer = Date.now();
   }
-});
 
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    buildMode = null;
-    showWarehouse = false;
-  }
-});
+  // Animations
+  animations = animations.filter(a => {
+    a.t++;
+    if (a.type === 'build') {
+      a.scale += 0.04;
+      return a.scale < 1.2;
+    }
+    return false;
+  });
 
-// ==================== POLYFILL roundRect ====================
-if (!CanvasRenderingContext2D.prototype.roundRect) {
-  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
-    if (typeof r === 'number') r = { tl: r, tr: r, br: r, bl: r };
-    this.beginPath();
-    this.moveTo(x + r.tl, y);
-    this.lineTo(x + w - r.tr, y);
-    this.quadraticCurveTo(x + w, y, x + w, y + r.tr);
-    this.lineTo(x + w, y + h - r.br);
-    this.quadraticCurveTo(x + w, y + h, x + w - r.br, y + h);
-    this.lineTo(x + r.bl, y + h);
-    this.quadraticCurveTo(x, y + h, x, y + h - r.bl);
-    this.lineTo(x, y + r.tl);
-    this.quadraticCurveTo(x, y, x + r.tl, y);
-    this.closePath();
-    return this;
-  };
+  // Floating texts
+  floatingTexts = floatingTexts.filter(f => {
+    f.y -= 1;
+    f.life--;
+    f.alpha = Math.max(0, f.life / 80);
+    return f.life > 0;
+  });
 }
 
-// ==================== INIT ====================
-loadGame();
-gameLoop();
+// ===== Render =====
+function render() {
+  if (!state) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawSky();
+  drawGround();
+  state.buildings.forEach(b => drawBuilding(b));
+  drawAnimations();
+  drawFloatingTexts();
+  drawHUD();
+  drawShopBar();
+  drawContextMenu();
+  drawInstructions();
+}
+
+function gameLoop() {
+  update();
+  render();
+  requestAnimationFrame(gameLoop);
+}
+
+// ===== Utility =====
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ===== Init =====
+loadState().then(() => {
+  dayTimer = Date.now();
+  gameLoop();
+});
