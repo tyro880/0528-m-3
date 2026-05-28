@@ -1,0 +1,12 @@
+{
+  "name": "canvas-farm-game",
+  "version": "1.0.0",
+  "description": "Canvas farm game with livestock system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
