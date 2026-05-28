@@ -1,28 +1,226 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <title>Canvas 畜牧农场</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      background: #1b2838;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-      font-family: 'Microsoft YaHei', sans-serif;
-      overflow: hidden;
-    }
-    #gameCanvas {
-      border: 3px solid #3d5a80;
-      border-radius: 10px;
-      box-shadow: 0 0 30px rgba(61,90,128,0.5);
-    }
-  </style>
+<meta charset="UTF-8">
+<title>农场</title>
+<style>* { margin:0; padding:0; } body { background:#2d5a27; display:flex; justify-content:center; align-items:center; height:100vh; }</style>
 </head>
 <body>
-  <canvas id="gameCanvas" width="1100" height="750"></canvas>
-  <script src="game.js"></script>
+<canvas id="c" width="900" height="600"></canvas>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+
+let data = { coins: 1000, feed: 3, hasChickenCoop: false, warehouse: [] };
+let showBuildMenu = false;
+let showCoopPanel = false;
+let floats = [];
+
+// ===== API calls =====
+async function load() {
+  const r = await fetch('/api/data');
+  data = await r.json();
+}
+async function buildCoop() {
+  const r = await (await fetch('/api/build-coop', { method:'POST', headers:{'Content-Type':'application/json'} })).json();
+  if (r.ok) { data = r.data; showBuildMenu = false; addFloat('建造成功! -200金币', 600, 400, '#ff0'); }
+  else addFloat(r.msg, 600, 300, '#f44');
+}
+async function buyFeed() {
+  const r = await (await fetch('/api/buy-feed', { method:'POST', headers:{'Content-Type':'application/json'} })).json();
+  if (r.ok) { data = r.data; addFloat('+1饲料 -15金币', 700, 50, '#0f0'); }
+  else addFloat(r.msg, 700, 50, '#f44');
+}
+async function feedChicken() {
+  const r = await (await fetch('/api/feed-chicken', { method:'POST', headers:{'Content-Type':'application/json'} })).json();
+  if (r.ok) { data = r.data; showCoopPanel = false; addFloat('🥚 鸡蛋x1 已存入仓库!', 620, 380, '#ffe'); }
+  else addFloat(r.msg, 620, 420, '#f44');
+}
+
+function addFloat(text, x, y, color) { floats.push({ text, x, y, color, life: 90 }); }
+
+// ===== Draw =====
+function draw() {
+  ctx.clearRect(0, 0, 900, 600);
+
+  // 地面
+  ctx.fillStyle = '#4a8c34';
+  ctx.fillRect(0, 0, 900, 600);
+
+  // 栅栏区域
+  ctx.strokeStyle = '#8B4513';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(50, 80, 500, 450);
+  ctx.fillStyle = '#3a7a28';
+  ctx.fillRect(50, 80, 500, 450);
+  ctx.fillStyle = '#fff';
+  ctx.font = '14px Arial';
+  ctx.fillText('🌾 农场区域', 60, 100);
+
+  // HUD 右上
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  fillRR(620, 10, 260, 80, 8);
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 16px Arial';
+  ctx.fillText('💰 金币: ' + data.coins, 640, 38);
+  ctx.fillStyle = '#90ee90';
+  ctx.fillText('🌾 饲料: ' + data.feed, 640, 62);
+  ctx.fillStyle = '#87cefa';
+  ctx.fillText('📦 仓库: ' + data.warehouse.length + ' 个鸡蛋', 640, 86);
+
+  // 买饲料按钮
+  ctx.fillStyle = '#2e7d32';
+  fillRR(620, 100, 140, 36, 6);
+  ctx.fillStyle = '#fff';
+  ctx.font = '14px Arial';
+  ctx.fillText('🛒 买饲料($15)', 632, 124);
+
+  // ===== 建造按钮（右侧空地）=====
+  if (!data.hasChickenCoop) {
+    ctx.fillStyle = '#c67b30';
+    fillRR(620, 300, 130, 44, 8);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 15px Arial';
+    ctx.fillText('🔨 建造', 655, 328);
+  }
+
+  // ===== 建造菜单 =====
+  if (showBuildMenu) {
+    ctx.fillStyle = 'rgba(20,20,40,0.95)';
+    fillRR(600, 350, 200, 70, 8);
+    ctx.strokeStyle = '#aaa';
+    ctx.lineWidth = 1;
+    strokeRR(600, 350, 200, 70, 8);
+    ctx.fillStyle = '#ffe';
+    ctx.font = '14px Arial';
+    ctx.fillText('选择建筑:', 615, 372);
+    // 选项
+    ctx.fillStyle = '#5d4037';
+    fillRR(615, 380, 170, 30, 5);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('🐔 鸡舍 — 200金币', 625, 400);
+  }
+
+  // ===== 鸡舍图标（右下角）=====
+  if (data.hasChickenCoop) {
+    // 鸡舍建筑
+    ctx.fillStyle = '#d4a056';
+    ctx.fillRect(630, 420, 80, 60);
+    ctx.fillStyle = '#8b0000';
+    ctx.beginPath();
+    ctx.moveTo(625, 422);
+    ctx.lineTo(670, 395);
+    ctx.lineTo(715, 422);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#5c3a1e';
+    ctx.fillRect(655, 450, 25, 30);
+    ctx.font = '24px serif';
+    ctx.fillText('🐔', 635, 470);
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px Arial';
+    ctx.fillText('鸡舍 (点击操作)', 625, 500);
+  }
+
+  // ===== 鸡舍面板 =====
+  if (showCoopPanel) {
+    ctx.fillStyle = 'rgba(0,0,0,0.9)';
+    fillRR(580, 440, 220, 100, 10);
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = 2;
+    strokeRR(580, 440, 220, 100, 10);
+    ctx.lineWidth = 1;
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px Arial';
+    ctx.fillText('🐔 鸡舍管理', 610, 465);
+    ctx.font = '13px Arial';
+    ctx.fillText('饲料剩余: ' + data.feed + ' 袋', 600, 488);
+    // 喂食按钮
+    ctx.fillStyle = data.feed > 0 ? '#388e3c' : '#666';
+    fillRR(610, 498, 100, 30, 5);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 13px Arial';
+    ctx.fillText('🌾 喂食', 632, 518);
+    // 关闭
+    ctx.fillStyle = '#aaa';
+    ctx.font = '11px Arial';
+    ctx.fillText('[点其他地方关闭]', 620, 540);
+  }
+
+  // 浮动文字
+  floats.forEach(f => {
+    ctx.globalAlpha = f.life / 90;
+    ctx.fillStyle = f.color;
+    ctx.font = 'bold 15px Arial';
+    ctx.fillText(f.text, f.x, f.y);
+  });
+  ctx.globalAlpha = 1;
+}
+
+function update() {
+  floats = floats.filter(f => { f.y -= 0.8; f.life--; return f.life > 0; });
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+
+// ===== Click =====
+c.addEventListener('click', (e) => {
+  const rect = c.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  // 买饲料
+  if (mx >= 620 && mx <= 760 && my >= 100 && my <= 136) { buyFeed(); return; }
+
+  // 建造按钮
+  if (!data.hasChickenCoop && mx >= 620 && mx <= 750 && my >= 300 && my <= 344) {
+    showBuildMenu = !showBuildMenu;
+    showCoopPanel = false;
+    return;
+  }
+
+  // 建造菜单 - 选鸡舍
+  if (showBuildMenu && mx >= 615 && mx <= 785 && my >= 380 && my <= 410) {
+    buildCoop();
+    return;
+  }
+
+  // 点击鸡舍
+  if (data.hasChickenCoop && mx >= 625 && mx <= 715 && my >= 395 && my <= 500) {
+    showCoopPanel = !showCoopPanel;
+    showBuildMenu = false;
+    return;
+  }
+
+  // 喂食按钮
+  if (showCoopPanel && mx >= 610 && mx <= 710 && my >= 498 && my <= 528) {
+    feedChicken();
+    return;
+  }
+
+  // 点其他地方关闭面板
+  showBuildMenu = false;
+  showCoopPanel = false;
+});
+
+function fillRR(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath(); ctx.fill();
+}
+function strokeRR(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath(); ctx.stroke();
+}
+
+load().then(loop);
+</script>
 </body>
 </html>

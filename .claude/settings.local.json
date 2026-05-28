@@ -5,7 +5,9 @@
       "PowerShell(Invoke-WebRequest -Uri \"http://localhost:5173\" -UseBasicParsing | Select-Object -ExpandProperty Content | Select-Object -First 30)",
       "PowerShell(Get-Process *)",
       "PowerShell(try { $r = Invoke-WebRequest -Uri \"http://localhost:3000\" -UseBasicParsing -ErrorAction Stop; \"Status: $\\($r.StatusCode\\)\"; \"Content length: $\\($r.Content.Length\\)\" } catch { $_.Exception.Message })",
-      "PowerShell($r = Invoke-WebRequest -Uri \"http://localhost:3000/api/state\" -UseBasicParsing; $r.Content)"
+      "PowerShell($r = Invoke-WebRequest -Uri \"http://localhost:3000/api/state\" -UseBasicParsing; $r.Content)",
+      "PowerShell(Remove-Item *)",
+      "PowerShell($r = Invoke-WebRequest -Uri \"http://localhost:3000/api/data\" -UseBasicParsing; \"Reload test: $\\($r.Content\\)\")"
     ]
   }
 }
